@@ -1,7 +1,6 @@
 #pragma once
 
 #include "parallel_hashmap/phmap.h"
-
 namespace mio
 {
     template <class Key, class Value,
