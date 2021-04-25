@@ -3,6 +3,7 @@
 #include <string>
 #include <stddef.h>
 #include <memory>
+#include <boost/asio.hpp>
 
 namespace mio
 {

@@ -1,15 +1,8 @@
 #pragma once
 
-#include <boost/functional/hash.hpp>
-#include <boost/uuid/uuid.hpp>
-#include <boost/fiber/all.hpp>
-
 #include <memory>
 #include <utility>
-#include <unordered_set>
-#include <unordered_map>
 #include <string>
-#include <shared_mutex>
 #include <variant>
 #include <vector>
 #include <atomic>
@@ -17,12 +10,17 @@
 #include <list>
 #include <functional>
 
-#include "mio/mq/detail/round_robin.hpp"
-#include "mio/mq/detail/basic_socket.hpp"
+#include <boost/functional/hash.hpp>
+#include <boost/uuid/uuid.hpp>
+#include <boost/fiber/all.hpp>
 
-#include "mio/mq/message.hpp"
-#include "mio/mq/future.hpp"
-#include "mio/mq/transfer.hpp"
+#include <mio/mq/detail/round_robin.hpp>
+#include <mio/mq/detail/basic_socket.hpp>
+#include <mio/mq/detail/container.hpp>
+#include <mio/mq/message.hpp>
+#include <mio/mq/future.hpp>
+#include <mio/mq/transfer.hpp>
+#include <mio/mq/session.hpp>
 
 namespace mio
 {
@@ -33,230 +31,41 @@ namespace mio
         public:
             using socket_t = detail::basic_socket;
             using acceptor_t = detail::basic_acceptor;
-            class session;
 
-        private:
-            using session_set_t = std::unordered_set<std::shared_ptr<session>>;
-            using session_list_t = std::list<std::shared_ptr<session>>;
-
-        public:
-            class session : public std::enable_shared_from_this<session>
-            {
-            private:
-                friend class manager;
-                manager *manager_;
-
-                std::unique_ptr<socket_t> socket_;
-                boost::fibers::buffered_channel<std::pair<std::shared_ptr<message>, std::shared_ptr<promise>>> write_pipe_;
-
-                boost::fibers::fiber read_fiber_;
-                boost::fibers::fiber write_fiber_;
-
-                //请求消息的回复信息
-                boost::fibers::mutex uuid_promise__mutex_;
-                std::unordered_map<boost::uuids::uuid, std::shared_ptr<promise>, boost::hash<boost::uuids::uuid>> uuid_promise_map_;
-
-                //该会话加入的所以组
-                std::shared_mutex group_map_mutex_;
-                std::unordered_map<std::string, session_list_t::iterator> group_map_;
-
-                size_t level_ = 0;
-
-                void do_write()
-                {
-                    try
-                    {
-                        while (1)
-                        {
-                            std::pair<std::shared_ptr<message>, std::shared_ptr<promise>> msg;
-                            write_pipe_.pop(msg);
-
-                            if (msg.second != nullptr)
-                            {
-                                uuid_promise__mutex_.lock();
-                                uuid_promise_map_[msg.first->uuid] = msg.second;
-                                uuid_promise__mutex_.unlock();
-                            }
-
-                            uint64_t name_size = msg.first->name.size();
-                            uint64_t data_size = msg.first->data.size();
-
-                            socket_->write(&msg.first->type, sizeof(msg.first->type));
-                            socket_->write(&msg.first->uuid, sizeof(msg.first->uuid));
-                            socket_->write(&name_size, sizeof(name_size));
-                            socket_->write(&data_size, sizeof(data_size));
-                            socket_->write(&msg.first->name[0], name_size);
-                            socket_->write(&msg.first->data[0], data_size);
-                        }
-                    }
-                    catch (const std::exception &e)
-                    {
-                        std::cerr << e.what() << '\n';
-                    }
-                }
-
-                void do_read()
-                {
-                    try
-                    {
-                        while (1)
-                        {
-                            auto msg = std::make_shared<message>();
-                            uint64_t name_size;
-                            uint64_t data_size;
-
-                            socket_->read(&msg->type, sizeof(msg->type));
-                            socket_->read(&msg->uuid, sizeof(msg->uuid));
-                            socket_->read(&name_size, sizeof(name_size));
-                            socket_->read(&data_size, sizeof(data_size));
-
-                            msg->name.resize(name_size);
-                            msg->data.resize(data_size);
-
-                            socket_->read(&msg->name[0], name_size);
-                            socket_->read(&msg->data[0], data_size);
-
-                            if (msg->type == message_type::RESPONSE)
-                            {
-                                uuid_promise_map_[msg->uuid]->set_value(msg);
-                            }
-                            else
-                            {
-                                auto &handler = manager_->message_handler_[msg->name];
-                                if (std::holds_alternative<message_handler_t>(handler.second))
-                                {
-                                    boost::fibers::fiber(std::get<message_handler_t>(handler.second), message_args{this->shared_from_this(), msg}).detach();
-                                }
-                                else
-                                {
-                                    std::get<message_queue_t>(handler.second)->push(message_args(this->shared_from_this(), std::move(msg)));
-                                }
-                            }
-                        }
-                    }
-                    catch (const std::exception &e)
-                    {
-                        std::cerr << e.what() << '\n';
-                    }
-                }
-
-            public:
-                session(manager *manager, decltype(socket_) &&socket) : manager_(manager), socket_(std::move(socket)), write_pipe_(4096)
-                {
-                    read_fiber_ = boost::fibers::fiber(&session::do_read, this);
-                    write_fiber_ = boost::fibers::fiber(&session::do_write, this);
-                }
-
-                ~session()
-                {
-                    std::cout << __func__ << std::endl;
-                }
-
-                void close()
-                {
-                    //触发回调
-                    //manager_->close_handler_(*this);
-
-                    //关闭读和写 纤程
-                    socket_->close();
-                    write_pipe_.close();
-
-                    read_fiber_.join();
-                    write_fiber_.join();
-
-                    //移除所有定义列表
-                    group_map_mutex_.lock();
-                    manager_->group_map_mutex_.lock();
-                    for (auto &group : group_map_)
-                    {
-                        manager_->group_map_[group.first].erase(group.second);
-                    }
-                    manager_->group_map_mutex_.unlock();
-                    group_map_mutex_.unlock();
-
-                    manager_->session_set_mutex_.lock();
-                    manager_->session_set_.erase(shared_from_this());
-                    manager_->session_set_mutex_.unlock();
-                }
-
-                future request(std::shared_ptr<message> &msg)
-                {
-                    auto promise = std::make_shared<mio::mq::promise>(1);
-                    write_pipe_.push({msg, promise});
-                    return promise->get_future();
-                }
-
-                void unicast(const std::shared_ptr<message> &msg)
-                {
-                    write_pipe_.push({msg, nullptr});
-                }
-
-                void response(const std::shared_ptr<message> &msg)
-                {
-                    write_pipe_.push({msg, nullptr});
-                }
-
-                void add_group(const std::string &group_name)
-                {
-                    group_map_mutex_.lock();
-                    manager_->group_map_mutex_.lock();
-
-                    manager_->group_map_[group_name].push_front(shared_from_this());
-                    group_map_[group_name] = manager_->group_map_[group_name].begin();
-
-                    manager_->group_map_mutex_.unlock();
-                    group_map_mutex_.unlock();
-                }
-
-                void remove_group(const std::string &group_name)
-                {
-                    group_map_mutex_.lock();
-                    manager_->group_map_mutex_.lock();
-
-                    manager_->group_map_[group_name].erase(group_map_[group_name]);
-                    group_map_.erase(group_name);
-
-                    manager_->group_map_mutex_.unlock();
-                    group_map_mutex_.unlock();
-                }
-
-                void set_level(size_t level)
-                {
-                    level_ = level;
-                }
-            };
-
-        private:
-            friend class session;
-
-            //收到消息的处理程序
-            using message_args = std::pair<std::weak_ptr<session>, std::shared_ptr<message>>;
-            using message_handler_t = std::function<void(message_args)>;
-            using message_queue_t = std::shared_ptr<boost::fibers::buffered_channel<message_args>>;
-
-            std::shared_mutex message_handler_mutex_;
-            std::unordered_map<std::string, std::pair<size_t, std::variant<message_handler_t, message_queue_t>>> message_handler_;
-
-            //会话set
-            boost::fibers::recursive_mutex session_set_mutex_;
-            session_set_t session_set_;
-
-            //组列表
-            std::shared_mutex group_map_mutex_;
-            std::unordered_map<std::string, session_list_t> group_map_;
+            using message_args = session::message_args;
+            using message_handler_t = session::message_handler_t;
+            using message_queue_t = session::message_queue_t;
 
             //当接受客户端 或 连接上服务器将 触发的回调
-            using verification_handler_t = std::function<void(const std::string &address, std::weak_ptr<session>)>;
+            using verification_handler_t = std::function<void(const std::string &address, const std::shared_ptr<session> &session_ptr)>;
+            using exception_handler_t = std::function<void(const std::exception &e)>;
+
+        private:
+            using message_map_t = session::message_map_t;
+            using session_list_t = std::list<std::weak_ptr<session>>;
+            struct group
+            {
+                boost::fibers::mutex mutex;
+                session_list_t list;
+                session_list_t::iterator load_balanc_it;
+            };
+
+            using group_map_t = detail::fiber_unordered_map<std::string, group>;
+            using acceptor_map_t = detail::fiber_unordered_map<std::string, std::pair<std::unique_ptr<boost::fibers::fiber>, std::unique_ptr<acceptor_t>>>;
+
             verification_handler_t acceptor_handler_;
             verification_handler_t connect_handler_;
+            exception_handler_t exception_handler_;
 
-            //会话关闭时触发
-            using close_handler_t = std::function<void(session &)>;
-            close_handler_t close_handler_;
+            //收到消息的处理程序
+            message_map_t message_handler_;
+
+            //组列表
+            group_map_t group_map_;
 
             //管理所有bind地址
-            boost::fibers::mutex acceptor_list_mutex_;
-            std::list<std::unique_ptr<acceptor_t>> acceptor_list_;
+            boost::fibers::mutex acceptor_map_mutex_;
+            acceptor_map_t acceptor_map_;
 
             //asio调度器分配
             std::atomic<size_t> io_context_count_;
@@ -284,10 +93,11 @@ namespace mio
                             try
                             {
                                 io_context_[i]->run();
+                                break;
                             }
                             catch (const std::exception &e)
                             {
-                                std::cerr << e.what() << '\n';
+                                exception_handler_(e);
                             }
                         }
                     }));
@@ -297,77 +107,78 @@ namespace mio
             ~manager()
             {
                 //关闭所有acceptor
-                acceptor_list_mutex_.lock();
-                for (auto &acceptor : acceptor_list_)
+                acceptor_map_mutex_.lock();
+                for (auto &acceptor : acceptor_map_)
                 {
-                    acceptor->close();
+                    acceptor.second.second->close();
+                    acceptor.second.first->join();
                 }
-                acceptor_list_mutex_.unlock();
+                acceptor_map_mutex_.unlock();
 
-                //关闭所有会话
-                for (auto &session : session_set_)
+                for (size_t i = 0; i < thread_size_; i++)
                 {
-                    session->close();
+                    io_context_[i]->stop();
+                    thread_[i].join();
                 }
             }
 
-            void on_acceptor(const verification_handler_t &handler)
+            auto &on_acceptor()
             {
-                acceptor_handler_ = handler;
+                return acceptor_handler_;
             }
 
-            void on_connect(const verification_handler_t &handler)
+            auto &on_connect()
             {
-                connect_handler_ = handler;
+                return connect_handler_;
             }
 
-            void on_colse(const close_handler_t handler)
+            auto &on_exception()
             {
-                close_handler_ = handler;
+                return exception_handler_;
             }
 
-            void registered(const std::string &name, size_t level, const std::variant<message_handler_t, message_queue_t> &handler)
+            auto &registered(const std::string &name)
             {
-                message_handler_mutex_.lock();
-                message_handler_[name] = {level, handler};
-                message_handler_mutex_.unlock();
+                return message_handler_[name];
             }
 
-            void logout(const std::string &name, size_t level)
+            void logout(const std::string &name)
             {
-                message_handler_mutex_.lock();
                 message_handler_.erase(name);
-                message_handler_mutex_.unlock();
             }
 
             template <typename Protocol>
             void bind(const std::string &address)
             {
-                acceptor_list_mutex_.lock();
-                acceptor_list_.push_back(std::make_unique<typename transfer<Protocol>::acceptor>(*get_io_context()));
-                auto it = --acceptor_list_.end();
-                acceptor_list_mutex_.unlock();
-
-                (*it)->bind(address);
+                //绑定地址
+                acceptor_map_[address].second = std::make_unique<typename transfer<Protocol>::acceptor>(*get_io_context());
+                acceptor_map_[address].second->bind(address);
 
                 auto io_context = get_io_context();
-
-                io_context->post([&, it, address]() {
-                    boost::fibers::fiber([&, it, address]() {
-                        while (1)
+                io_context->post([&, address]() {
+                    acceptor_map_[address].first = std::make_unique<boost::fibers::fiber>([&, address]() {
+                        try
                         {
-                            auto socket = (*it)->accept(*get_io_context());
-
-                            auto session_ptr = std::make_shared<session>(this, std::move(socket));
-
-                            session_set_mutex_.lock();
-                            session_set_.insert(session_ptr);
-                            session_set_mutex_.unlock();
-
-                            boost::fibers::fiber(acceptor_handler_, address, session_ptr).detach();
+                            while (1)
+                            {
+                                auto socket = acceptor_map_[address].second->accept(*get_io_context());
+                                auto session_ptr = std::make_shared<session>(std::move(socket), this->message_handler_);
+                                acceptor_handler_(address, session_ptr);
+                            }
                         }
-                    }).detach();
+                        catch (const std::exception &e)
+                        {
+                            exception_handler_(e);
+                        }
+                    });
                 });
+            }
+
+            void unbind(const std::string &address)
+            {
+                acceptor_map_[address].second->close();
+                acceptor_map_[address].first->join();
+                acceptor_map_.erase(address);
             }
 
             template <typename Protocol>
@@ -376,30 +187,78 @@ namespace mio
                 auto io_context = get_io_context();
                 io_context->post([&, address]() {
                     boost::fibers::fiber([&, address]() {
-                        auto socket = std::make_unique<typename transfer<Protocol>::socket>(*get_io_context());
-                        socket->connect(address);
+                        try
+                        {
+                            auto socket = std::make_unique<typename transfer<Protocol>::socket>(*get_io_context());
+                            socket->connect(address);
 
-                        auto session_ptr = std::make_shared<session>(this, std::move(socket));
-
-                        session_set_mutex_.lock();
-                        session_set_.insert(session_ptr);
-                        session_set_mutex_.unlock();
-
-                        boost::fibers::fiber(connect_handler_, address, session_ptr).detach();
+                            auto session_ptr = std::make_shared<session>(std::move(socket), this->message_handler_);
+                            connect_handler_(address, session_ptr);
+                        }
+                        catch (const std::exception &e)
+                        {
+                            exception_handler_(e);
+                        }
                     }).detach();
                 });
             }
 
-            void push(const std::string &group_name, message msg)
+            session_list_t::iterator add_group(const std::string &group_name, const std::weak_ptr<session> &session_ptr)
             {
-                auto message_ptr = std::make_shared<message>(msg);
-
-                group_map_mutex_.lock_shared();
-                for (auto &it : group_map_[group_name])
+                std::lock_guard(group_map_[group_name].mutex);
+                group_map_[group_name].list.push_front(session_ptr);
+                if (group_map_[group_name].list.size() == 1)
                 {
-                    it->write_pipe_.push({message_ptr, nullptr});
+                    group_map_[group_name].load_balanc_it = group_map_[group_name].list.begin();
                 }
-                group_map_mutex_.unlock_shared();
+
+                return group_map_[group_name].list.begin();
+            }
+
+            void remove_group(const std::string &group_name, session_list_t::iterator it)
+            {
+                std::lock_guard(group_map_[group_name].mutex);
+                if (group_map_[group_name].load_balanc_it == it)
+                {
+                    ++group_map_[group_name].load_balanc_it;
+                }
+                group_map_[group_name].list.erase(it);
+            }
+
+            void broadcast(const std::string &group_name, const std::shared_ptr<message> &msg)
+            {
+                std::lock_guard(group_map_[group_name].mutex);
+                for (auto &it : group_map_[group_name].list)
+                {
+                    it.lock()->unicast(msg);
+                }
+            }
+
+            future request(const std::string &group_name, const std::shared_ptr<message> &msg)
+            {
+                std::lock_guard(group_map_[group_name].mutex);
+                auto promise = std::make_shared<mio::mq::promise>(group_map_[group_name].list.size());
+                for (auto &it : group_map_[group_name].list)
+                {
+                    it.lock()->push(msg, promise);
+                }
+
+                return promise->get_future();
+            }
+
+            std::shared_ptr<session> load_balanc(const std::string &group_name)
+            {
+                std::lock_guard(group_map_[group_name].mutex);
+                if (group_map_[group_name].list.empty())
+                    return nullptr;
+
+                auto &it = group_map_[group_name].load_balanc_it;
+
+                if (it == group_map_[group_name].list.end())
+                {
+                    it = group_map_[group_name].list.begin();
+                }
+                return it++->lock();
             }
         };
     } // namespace mq

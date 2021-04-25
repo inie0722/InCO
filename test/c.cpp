@@ -4,7 +4,7 @@
 #include <boost/uuid/uuid_io.hpp>
 
 #include "mio/mq/manager.hpp"
-#include "mio/interprocess/pipe.hpp"
+#include <mio/network/tcp.hpp>
 
 #include "mio/mq/manager.hpp"
 
@@ -12,32 +12,27 @@ using namespace mio::mq;
 
 struct protocol
 {
-    using socket_t = mio::interprocess::pipe::socket;
-    using acceptor_t = mio::interprocess::pipe::acceptor;
+    using socket_t = mio::network::tcp::socket;
+    using acceptor_t = mio::network::tcp::acceptor;
 };
 
 int main(void)
 {
+    std::list<std::shared_ptr<session>> list;
     mio::mq::manager m(1);
 
-    m.registered("test", 0, [&](std::pair<std::weak_ptr<manager::session>, std::shared_ptr<message>> msg){
+    m.registered("test") = {0, [&](std::pair<std::weak_ptr<mio::mq::session>, std::shared_ptr<message>> msg){
         std::cout << &msg.second->name[0] << std::endl;
+    }};
 
-        auto msg_req = std::make_shared<mio::mq::message>();
-        msg_req->name = "call";
-        msg_req->data= msg.second->data;
-        msg_req->uuid = boost::uuids::random_generator()();
-        msg_req->type = mio::mq::message_type::REQUEST;
-
-        auto f = msg.first.lock()->request(msg_req);
-        f.get();
-        std::cout << "请求成功" << std::endl;
-    });
-
-    m.on_connect([&](const std::string &address, const std::weak_ptr<mio::mq::manager::session>& session){
+    m.on_connect() = [&](const std::string &address, const std::shared_ptr<mio::mq::session> &session){
+        list.push_back(session);
         std::cout << address << std::endl;
-        //std::cout << session->get_uuid() << std::endl;
-    });
+    };
+
+    m.on_exception() = [&](const std::exception &e) {
+        std::cout << e.what() << std::endl;
+    };
 
     m.connect<protocol>("ipv4:127.0.0.1:9999");
     
