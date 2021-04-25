@@ -84,9 +84,9 @@ namespace mio
                 thread_size_ = thread_size;
                 for (size_t i = 0; i < thread_size; i++)
                 {
-                    io_context_.push_back(std::make_unique<boost::asio::io_context>());
-                    thread_.push_back(std::thread([this, i]() {
-                        boost::fibers::use_scheduling_algorithm<boost::fibers::asio::round_robin>(io_context_[i]);
+                    io_context_.push_back(std::make_shared<boost::asio::io_context>());
+                    thread_.push_back(std::thread([&, i]() {
+                        boost::fibers::use_scheduling_algorithm<boost::fibers::asio::round_robin>(std::shared_ptr(io_context_[i]));
 
                         while (1)
                         {
