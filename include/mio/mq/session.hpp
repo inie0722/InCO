@@ -25,9 +25,9 @@ namespace mio
         public:
             using socket_t = detail::basic_socket;
             using acceptor_t = detail::basic_acceptor;
-            using message_args = std::pair<std::weak_ptr<session>, std::shared_ptr<message>>;
-            using message_handler_t = std::function<void(message_args args)>;
-            using message_queue_t = std::shared_ptr<boost::fibers::buffered_channel<message_args>>;
+            using message_args_t = std::pair<std::weak_ptr<session>, std::shared_ptr<message>>;
+            using message_handler_t = std::function<void(message_args_t args)>;
+            using message_queue_t = std::shared_ptr<boost::fibers::buffered_channel<message_args_t>>;
 
             using close_handler_t = std::function<void(const std::shared_ptr<session> &session_ptr)>;
             using exception_handler_t = std::function<void(const std::shared_ptr<session> &session_ptr, const std::exception &e)>;
@@ -124,11 +124,11 @@ namespace mio
                             {
                                 if (std::holds_alternative<message_handler_t>(handler.second))
                                 {
-                                    boost::fibers::fiber(std::get<message_handler_t>(handler.second), message_args{this->shared_from_this(), msg}).detach();
+                                    boost::fibers::fiber(std::get<message_handler_t>(handler.second), message_args_t{this->shared_from_this(), msg}).detach();
                                 }
                                 else
                                 {
-                                    std::get<message_queue_t>(handler.second)->push(message_args(this->shared_from_this(), std::move(msg)));
+                                    std::get<message_queue_t>(handler.second)->push(message_args_t(this->shared_from_this(), std::move(msg)));
                                 }
                             }
                         }

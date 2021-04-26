@@ -32,7 +32,7 @@ namespace mio
             using socket_t = detail::basic_socket;
             using acceptor_t = detail::basic_acceptor;
 
-            using message_args = session::message_args;
+            using message_args_t = session::message_args_t;
             using message_handler_t = session::message_handler_t;
             using message_queue_t = session::message_queue_t;
 
