@@ -63,9 +63,9 @@ namespace mio
                     acceptor_t::bind(address);
                 }
 
-                virtual std::unique_ptr<detail::basic_socket> accept(boost::asio::io_context &io_context)
+                virtual std::shared_ptr<detail::basic_socket> accept(boost::asio::io_context &io_context)
                 {
-                    std::unique_ptr<detail::basic_socket> ptr = std::make_unique<socket>(io_context);
+                    std::shared_ptr<detail::basic_socket> ptr = std::make_shared<socket>(io_context);
 
                     acceptor_t::async_accept(static_cast<socket_t &>(static_cast<socket &>(*ptr)), boost::fibers::asio::yield);
 

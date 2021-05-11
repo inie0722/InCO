@@ -37,7 +37,7 @@ namespace mio
             using message_queue_t = session::message_queue_t;
 
             //当接受客户端 或 连接上服务器将 触发的回调
-            using verification_handler_t = std::function<void(const std::string &address, const std::shared_ptr<session> &session_ptr)>;
+            using acceptor_handler_t = std::function<void(const std::string &address, const std::shared_ptr<session> &session_ptr)>;
             using exception_handler_t = std::function<void(const std::exception &e)>;
 
         private:
@@ -53,8 +53,7 @@ namespace mio
             using group_map_t = detail::fiber_unordered_map<std::string, group>;
             using acceptor_map_t = detail::fiber_unordered_map<std::string, std::pair<std::unique_ptr<boost::fibers::fiber>, std::unique_ptr<acceptor_t>>>;
 
-            verification_handler_t acceptor_handler_;
-            verification_handler_t connect_handler_;
+            acceptor_handler_t acceptor_handler_;
             exception_handler_t exception_handler_;
 
             //收到消息的处理程序
@@ -127,11 +126,6 @@ namespace mio
                 return acceptor_handler_;
             }
 
-            auto &on_connect()
-            {
-                return connect_handler_;
-            }
-
             auto &on_exception()
             {
                 return exception_handler_;
@@ -161,9 +155,13 @@ namespace mio
                         {
                             while (1)
                             {
-                                auto socket = acceptor_map_[address].second->accept(*get_io_context());
-                                auto session_ptr = std::make_shared<session>(std::move(socket), this->message_handler_);
-                                acceptor_handler_(address, session_ptr);
+                                auto socket_io_context = get_io_context();
+                                auto socket = acceptor_map_[address].second->accept(*socket_io_context);
+
+                                socket_io_context->post([&, address, socket]() {
+                                    auto session_ptr = std::make_shared<session>(socket, this->message_handler_);
+                                    acceptor_handler_(address, session_ptr);
+                                });
                             }
                         }
                         catch (const std::exception &e)
@@ -182,25 +180,11 @@ namespace mio
             }
 
             template <typename Protocol>
-            void connect(const std::string &address)
+            std::shared_ptr<session> connect(const std::string &address)
             {
-                auto io_context = get_io_context();
-                io_context->post([&, address]() {
-                    boost::fibers::fiber([&, address]() {
-                        try
-                        {
-                            auto socket = std::make_unique<typename transfer<Protocol>::socket>(*get_io_context());
-                            socket->connect(address);
-
-                            auto session_ptr = std::make_shared<session>(std::move(socket), this->message_handler_);
-                            connect_handler_(address, session_ptr);
-                        }
-                        catch (const std::exception &e)
-                        {
-                            exception_handler_(e);
-                        }
-                    }).detach();
-                });
+                auto socket = std::make_unique<typename transfer<Protocol>::socket>(*get_io_context());
+                socket->connect(address);
+                return std::make_shared<session>(std::move(socket), this->message_handler_);
             }
 
             session_list_t::iterator add_group(const std::string &group_name, const std::weak_ptr<session> &session_ptr)

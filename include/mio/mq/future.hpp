@@ -28,6 +28,7 @@ namespace mio
             std::shared_ptr<message> get()
             {
                 std::shared_ptr<message> msg;
+                
                 pipe_->pop(msg);
 
                 return msg;

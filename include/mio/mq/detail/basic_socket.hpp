@@ -29,7 +29,7 @@ namespace mio
             {
             public:
                 virtual void bind(const std::string &address) = 0;
-                virtual std::unique_ptr<detail::basic_socket> accept(boost::asio::io_context &io_context) = 0;
+                virtual std::shared_ptr<detail::basic_socket> accept(boost::asio::io_context &io_context) = 0;
                 virtual void close() = 0;
                 virtual ~basic_acceptor() = default;
             };
