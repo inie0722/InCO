@@ -142,15 +142,15 @@ namespace mio
             }
 
             template <typename Protocol>
-            void bind(const std::string &address)
+            void bind(const std::string &address, const std::string &key)
             {
                 //绑定地址
                 acceptor_map_[address].second = std::make_unique<typename transfer<Protocol>::acceptor>(*get_io_context());
                 acceptor_map_[address].second->bind(address);
 
                 auto io_context = get_io_context();
-                io_context->post([&, address]() {
-                    acceptor_map_[address].first = std::make_unique<boost::fibers::fiber>([&, address]() {
+                io_context->post([&, address, key]() {
+                    acceptor_map_[address].first = std::make_unique<boost::fibers::fiber>([&, address, key]() {
                         try
                         {
                             while (1)
@@ -158,9 +158,21 @@ namespace mio
                                 auto socket_io_context = get_io_context();
                                 auto socket = acceptor_map_[address].second->accept(*socket_io_context);
 
-                                socket_io_context->post([&, address, socket]() {
-                                    auto session_ptr = std::make_shared<session>(socket, this->message_handler_);
-                                    acceptor_handler_(address, session_ptr);
+                                socket_io_context->post([&, address, socket, key]() {
+                                    boost::fibers::fiber([&, address, socket, key]() {
+                                        //验证 key
+                                        std::string clinet_key;
+                                        clinet_key.resize(key.size());
+                                        socket->read(&clinet_key[0], clinet_key.size());
+                                        if (clinet_key != key)
+                                        {
+                                            socket->close();
+                                            return;
+                                        }
+
+                                        auto session_ptr = std::make_shared<session>(socket, this->message_handler_);
+                                        acceptor_handler_(address, session_ptr);
+                                    }).detach();
                                 });
                             }
                         }
@@ -180,10 +192,14 @@ namespace mio
             }
 
             template <typename Protocol>
-            std::shared_ptr<session> connect(const std::string &address)
+            std::shared_ptr<session> connect(const std::string &address, const std::string &key)
             {
                 auto socket = std::make_unique<typename transfer<Protocol>::socket>(*get_io_context());
                 socket->connect(address);
+
+                //发送key
+                socket->write(&key[0], key.size());
+                
                 return std::make_shared<session>(std::move(socket), this->message_handler_);
             }
 
