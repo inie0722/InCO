@@ -194,13 +194,24 @@ namespace mio
             template <typename Protocol>
             std::shared_ptr<session> connect(const std::string &address, const std::string &key)
             {
-                auto socket = std::make_unique<typename transfer<Protocol>::socket>(*get_io_context());
+                auto socket_io_context = get_io_context();
+                auto socket = std::make_unique<typename transfer<Protocol>::socket>(*socket_io_context);
                 socket->connect(address);
 
                 //发送key
                 socket->write(&key[0], key.size());
-                
-                return std::make_shared<session>(std::move(socket), this->message_handler_);
+
+                boost::fibers::promise<std::shared_ptr<session>> session_ptr_promise;
+
+                auto session_ptr_future = session_ptr_promise.get_future();
+
+                socket_io_context->post([&]() {
+                    boost::fibers::fiber([&]() {
+                        session_ptr_promise.set_value(std::make_shared<session>(std::move(socket), this->message_handler_));
+                    }).detach();
+                });
+
+                return session_ptr_future.get();
             }
 
             session_list_t::iterator add_group(const std::string &group_name, const std::weak_ptr<session> &session_ptr)
