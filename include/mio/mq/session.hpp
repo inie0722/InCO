@@ -22,9 +22,10 @@ namespace mio
         class session : public std::enable_shared_from_this<session>
         {
         public:
+            using message_args_t = std::pair<std::weak_ptr<session>, std::shared_ptr<message>>;
             using socket_t = detail::basic_socket;
             using acceptor_t = detail::basic_acceptor;
-            using message_args_t = std::pair<std::weak_ptr<session>, std::shared_ptr<message>>;
+
             using message_handler_t = std::function<void(message_args_t args)>;
             using message_queue_t = boost::fibers::buffered_channel<message_args_t>;
 
@@ -119,7 +120,7 @@ namespace mio
                         //响应消息
                         if (msg->type == message_type::RESPONSE)
                         {
-                            uuid_promise_map_.at(msg->uuid)->set_value(msg);
+                            uuid_promise_map_.at(msg->uuid)->set_value({this->shared_from_this(), msg});
                             uuid_promise_map_.erase(msg->uuid);
                         }
                         else
